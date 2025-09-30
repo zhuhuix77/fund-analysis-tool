@@ -38,3 +38,4 @@ ENV/
 # IDE settings
 .idea/
 .vscode/
+my_transactions.csv
