@@ -209,7 +209,7 @@ with st.sidebar:
 
     st.subheader("5. 设置投资金额")
     dca_amount = st.number_input("每次定投金额 (元)", 100, value=1000, step=100)
-    threshold_buy_amount = st.number_input("每次阈值买入金额 (元)", 100, value=10000, step=100)
+    threshold_buy_amount = st.number_input("每次阈值买入金额 (元)", 100, value=1000, step=100)
 
 # --- Main Panel with Tabs ---
 tab1, tab2 = st.tabs(["策略回测分析", "我的交易记录"])
@@ -272,7 +272,7 @@ with tab1:
                     value=f"{thr_results['final_value']:,.2f} 元",
                     delta=f"总回报率: {thr_results['return_rate']:.2f}%"
                 )
-                st.markdown(f"<small>总投入: {thr_results['total_invested']:,.2f} 元 | **最大回撤**: <span style='color:red;'>{thr_results['max_drawdown']:.2f}%</span></small>", unsafe_allow_html=True)
+                st.markdown(f"<small>净投入 <span title='策略从外部引入的总资金，不包含盈利再投的部分'>(?):</span> {thr_results['total_invested']:,.2f} 元 | **最大回撤**: <span style='color:red;'>{thr_results['max_drawdown']:.2f}%</span></small>", unsafe_allow_html=True)
 
             fig_value = go.Figure()
             fig_value.add_trace(go.Scatter(x=dca_results['series'].index, y=dca_results['series'].values, mode='lines', name=dca_results['name']))
