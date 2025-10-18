@@ -38,3 +38,5 @@ ENV/
 # IDE settings
 .idea/
 .vscode/
+
+user_config.json
