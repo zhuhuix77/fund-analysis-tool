@@ -43,4 +43,6 @@ jobs:
           echo '}' >> user_config.json
 
       - name: Run monitor script
+        env:
+          TZ: Asia/Shanghai
         run: python monitor.py
