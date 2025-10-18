@@ -3,5 +3,10 @@
     "buy_threshold": -5.0,
     "sell_threshold": 10.0,
     "lookback_period": 20
+  },
+  "012348": {
+    "buy_threshold": -5.0,
+    "sell_threshold": 10.0,
+    "lookback_period": 20
   }
 }
