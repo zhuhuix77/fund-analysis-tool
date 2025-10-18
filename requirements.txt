@@ -1,5 +1,7 @@
+requests
 streamlit
 pandas
 numpy
 akshare
 plotly
+PyGithub

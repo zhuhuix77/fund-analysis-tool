@@ -6,6 +6,13 @@ from datetime import datetime, timedelta
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import os
+import json
+import time
+import base64
+from datetime import date
+from github import Github, UnknownObjectException
+
+from fund_monitor.core import get_strategy_advice
 
 # --- Page Configuration ---
 st.set_page_config(
@@ -16,8 +23,53 @@ st.set_page_config(
 
 # --- Constants and File Paths ---
 TRANSACTIONS_FILE = 'my_transactions.csv'
+STRATEGIES_FILE = 'fund_strategies.json'
 
-# --- Data Persistence & State ---
+# --- GitHub Integration Functions ---
+@st.cache_resource
+def get_github_repo():
+    """Initializes connection to the GitHub repo using secrets."""
+    try:
+        # These secrets must be set in your Streamlit Cloud app settings
+        github_token = st.secrets["GITHUB_TOKEN"]
+        repo_name = st.secrets["GITHUB_REPO_NAME"]
+        g = Github(github_token)
+        return g.get_repo(repo_name)
+    except Exception as e:
+        st.error(f"无法连接到 GitHub 仓库，请检查 Streamlit Secrets 配置: {e}")
+        return None
+
+def get_json_from_repo(repo, file_path):
+    """Fetches and decodes a JSON file from the GitHub repo."""
+    try:
+        content_obj = repo.get_contents(file_path)
+        decoded_content = base64.b64decode(content_obj.content).decode('utf-8')
+        return json.loads(decoded_content)
+    except UnknownObjectException:
+        return {} # File doesn't exist yet, return empty dict
+    except Exception as e:
+        st.error(f"从 GitHub 读取文件 {file_path} 失败: {e}")
+        return {}
+
+def save_json_to_repo(repo, file_path, data, commit_message):
+    """Commits and pushes a JSON file to the GitHub repo."""
+    try:
+        json_content = json.dumps(data, indent=2, ensure_ascii=False)
+        
+        try:
+            # Check if file exists to get its SHA for update
+            file_obj = repo.get_contents(file_path)
+            repo.update_file(file_path, commit_message, json_content, file_obj.sha)
+            st.success(f"策略文件已成功同步到 GitHub！")
+        except UnknownObjectException:
+            # File doesn't exist, create it
+            repo.create_file(file_path, commit_message, json_content)
+            st.success(f"策略文件已成功创建并同步到 GitHub！")
+        return True
+    except Exception as e:
+        st.error(f"同步策略文件到 GitHub 失败: {e}")
+        return False
+
 def load_transactions_from_file():
     """从 CSV 文件加载个人交易记录"""
     if not os.path.exists(TRANSACTIONS_FILE):
@@ -42,6 +94,16 @@ def save_transactions_to_file(df):
 # 在应用启动时，从文件加载交易记录到 Session State
 if 'transactions' not in st.session_state:
     st.session_state.transactions = load_transactions_from_file()
+
+# Strategies are now loaded from GitHub at the start
+if 'strategies' not in st.session_state:
+    repo = get_github_repo()
+    if repo:
+        with st.spinner("正在从 GitHub 同步最新监控策略..."):
+            st.session_state.strategies = get_json_from_repo(repo, STRATEGIES_FILE)
+    else:
+        st.session_state.strategies = {}
+        st.warning("无法从 GitHub 加载策略，将使用空配置。请检查 Secrets。")
 
 # --- Helper Functions ---
 @st.cache_data
@@ -212,7 +274,7 @@ with st.sidebar:
     threshold_buy_amount = st.number_input("每次阈值买入金额 (元)", 100, value=1000, step=100)
 
 # --- Main Panel with Tabs ---
-tab1, tab2 = st.tabs(["策略回测分析", "我的交易记录"])
+tab1, tab2, tab3 = st.tabs(["策略回测分析", "我的交易记录", "云端部署与监控"])
 
 with tab1:
     st.header("🔍 策略回测与今日建议")
@@ -311,6 +373,22 @@ with tab1:
             fig_trades.update_yaxes(title_text="基金单位净值", secondary_y=True)
             st.plotly_chart(fig_trades, use_container_width=True)
             
+            # --- Add to Monitor Button ---
+            st.info("如果觉得当前参数下的阈值策略表现良好，可以一键将其加入后台监控。")
+            if st.button("📈 将此策略加入后台监控 (自动同步到 GitHub)", key=f"add_strat_{fund_code}", use_container_width=True):
+                strategy_key = fund_code
+                strategy_data = {
+                    "buy_threshold": buy_threshold,
+                    "sell_threshold": sell_threshold,
+                    "lookback_period": lookback_period
+                }
+                st.session_state.strategies[strategy_key] = strategy_data
+                repo = get_github_repo()
+                if repo:
+                    save_json_to_repo(repo, STRATEGIES_FILE, st.session_state.strategies, f"Add/Update strategy for {fund_code}")
+                else:
+                    st.error("无法同步策略，因为未能连接到 GitHub 仓库。")
+
             if thr_transactions:
                 st.write("**交易记录:**")
                 trans_df = pd.DataFrame(thr_transactions)
@@ -543,3 +621,81 @@ with tab2:
 
             except Exception as e:
                 st.error(f"分析个人持仓时出错: {e}")
+
+with tab3:
+    st.header("⚙️ 云端部署与监控")
+    st.info("""
+    本应用已适配云端部署。后台监控任务 (`monitor.py`) 将通过 GitHub Actions 自动运行，您的机密信息（如邮箱密码、GitHub 令牌）将通过 Streamlit 和 GitHub 的 **Secrets** 功能进行安全管理。
+    
+    **在部署前，请务必仔细阅读 `DEPLOYMENT.md` 文件，并按照指南完成所有 Secrets 的配置。**
+    """)
+
+    # --- Real-time Dashboard ---
+    st.subheader("实时监控看板")
+    st.markdown("点击下方按钮，可实时获取当前所有监控策略的最新估值和操作建议。")
+
+    if 'dashboard_results' not in st.session_state:
+        st.session_state.dashboard_results = []
+
+    if st.button("🔄 刷新实时数据", use_container_width=True):
+        current_strategies = st.session_state.strategies
+        if current_strategies:
+            with st.spinner("正在获取所有监控中基金的最新估值和建议..."):
+                results = []
+                for fund_code, params in current_strategies.items():
+                    advice_result = get_strategy_advice(fund_code, params)
+                    results.append(advice_result)
+                    time.sleep(1) # Be polite to API
+                st.session_state.dashboard_results = results
+        else:
+            st.session_state.dashboard_results = []
+            st.warning("您还没有添加任何监控策略，无法获取实时数据。")
+
+    if st.session_state.dashboard_results:
+        st.write("---")
+        for advice_result in st.session_state.dashboard_results:
+            if advice_result['status'] == '成功':
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.markdown(f"**{advice_result['name']}** (`{advice_result['code']}`)")
+                with col2:
+                    st.metric(
+                        label="估算回顾期收益率",
+                        value=f"{advice_result['est_return']:.2f}%"
+                    )
+                with col3:
+                    st.markdown(f"**操作建议: <font color='{advice_result['advice_color']}'>{advice_result['advice']}!</font>**", unsafe_allow_html=True)
+
+                with st.expander(f"查看 {advice_result['code']} 计算详情"):
+                    details = advice_result['details']
+                    if isinstance(details.get('reference_date'), date):
+                        details['reference_date'] = details['reference_date'].strftime('%Y-%m-%d')
+                    st.json(details)
+            else:
+                st.error(f"**{advice_result.get('name', '未知基金')}**: {advice_result['status']}")
+            st.divider()
+
+    # --- Monitored Strategies ---
+    st.subheader("当前监控的策略 (已同步到 GitHub)")
+    if not st.session_state.strategies:
+        st.warning("目前没有正在监控的策略。请在“策略回测分析”页面添加。")
+    else:
+        for fund_code, params in list(st.session_state.strategies.items()):
+            fund_name = get_fund_name(fund_code)
+            col1, col2, col3, col4, col5 = st.columns([2, 2, 2, 2, 1])
+            with col1:
+                st.markdown(f"**{fund_name}** (`{fund_code}`)")
+            with col2:
+                st.metric("买入阈值", f"{params['buy_threshold']}%")
+            with col3:
+                st.metric("卖出阈值", f"{params['sell_threshold']}%")
+            with col4:
+                st.metric("回顾期", f"{params['lookback_period']} 天")
+            with col5:
+                if st.button("🗑️", key=f"del_{fund_code}", help="删除此监控策略并同步到 GitHub"):
+                    del st.session_state.strategies[fund_code]
+                    repo = get_github_repo()
+                    if repo:
+                        save_json_to_repo(repo, STRATEGIES_FILE, st.session_state.strategies, f"Remove strategy for {fund_code}")
+                    st.rerun()
+            st.divider()

@@ -1,0 +1,12 @@
+{
+  "email": {
+    "sender_email": "zhuhuix@163.com",
+    "password": "TRg7cGNKavC4838X",
+    "receiver_emails": [
+      "zhuhuix@dingtalk.com"
+    ],
+    "smtp_server": "smtp.163.com",
+    "smtp_port": 465
+  },
+  "monitoring_interval_seconds": 300
+}
