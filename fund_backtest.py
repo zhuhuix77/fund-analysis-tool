@@ -13,6 +13,7 @@ import json
 import time
 from typing import Dict, List, Tuple, Optional, Any
 import warnings
+import akshare as ak
 warnings.filterwarnings('ignore')
 
 # 设置中文字体
@@ -55,7 +56,7 @@ class FundDataDownloader:
             print(f"获取基金信息失败: {e}")
             return {}
     
-    def get_fund_history(self, fund_code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+    def get_fund_history(self, fund_code: str, start_date: Optional[str] = None, end_date: Optional[str] = None) -> pd.DataFrame:
         """获取基金历史净值数据"""
         try:
             # 使用天天基金网的历史净值接口
@@ -220,8 +221,8 @@ class FundBacktester:
     
     def simulate_investment(self, initial_amount: float = 10000, 
                           investment_strategy: str = 'lump_sum',
-                          buy_threshold: float = None,
-                          sell_threshold: float = None,
+                          buy_threshold: Optional[float] = None,
+                          sell_threshold: Optional[float] = None,
                           lookback_period: int = 20) -> pd.DataFrame:
         """
         模拟投资
@@ -487,6 +488,26 @@ def main():
         return
     
     print(f"成功获取 {len(fund_data)} 天的数据")
+
+    # --- 新增：根据交易日历过滤数据 ---
+    print("正在根据交易日历过滤数据...")
+    try:
+        trade_cal_df = ak.tool_trade_date_hist_sina()
+        trade_dates = set(pd.to_datetime(trade_cal_df['trade_date']).dt.date)
+        
+        original_len = len(fund_data)
+        # 确保 fund_data 的 'date' 列是 date 类型，以便比较
+        fund_data = fund_data[fund_data['date'].dt.date.isin(trade_dates)]
+        filtered_len = len(fund_data)
+        print(f"数据过滤完成，从 {original_len} 天减少到 {filtered_len} 天交易日数据。")
+
+    except Exception as e:
+        print(f"获取交易日历失败: {e}。将仅使用原始数据进行回测。")
+    
+    if fund_data.empty:
+        print("根据交易日历过滤后无有效数据，程序退出。")
+        return
+    # --- 过滤结束 ---
     
     # 2. 进行回测分析
     print("\n2. 正在进行回测分析...")

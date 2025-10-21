@@ -28,14 +28,20 @@ STRATEGIES_FILE = 'fund_strategies.json'
 # --- GitHub Integration Functions ---
 @st.cache_resource
 def get_github_repo():
-    """Initializes connection to the GitHub repo using secrets."""
+    """Initializes connection to the GitHub repo using secrets if available."""
     try:
-        # These secrets must be set in your Streamlit Cloud app settings
+        # Directly try to access secrets. This is the standard way for cloud deployment.
         github_token = st.secrets["GITHUB_TOKEN"]
         repo_name = st.secrets["GITHUB_REPO_NAME"]
         g = Github(github_token)
         return g.get_repo(repo_name)
+    except FileNotFoundError:
+        # This error is expected in a local environment where secrets.toml does not exist.
+        # We catch it and return None to signal that we are in "local mode".
+        return None
     except Exception as e:
+        # This catches other potential errors, like missing keys in an existing secrets file,
+        # or network issues when connecting to GitHub.
         st.error(f"无法连接到 GitHub 仓库，请检查 Streamlit Secrets 配置: {e}")
         return None
 
@@ -70,6 +76,28 @@ def save_json_to_repo(repo, file_path, data, commit_message):
         st.error(f"同步策略文件到 GitHub 失败: {e}")
         return False
 
+def load_strategies_from_local(file_path):
+    """Loads strategies from a local JSON file."""
+    if not os.path.exists(file_path):
+        return {}
+    try:
+        with open(file_path, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception as e:
+        st.error(f"从本地文件 {file_path} 加载策略失败: {e}")
+        return {}
+
+def save_strategies_to_local(file_path, data):
+    """Saves strategies to a local JSON file."""
+    try:
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        st.success("策略已成功保存到本地文件！")
+        return True
+    except Exception as e:
+        st.error(f"保存策略到本地文件 {file_path} 失败: {e}")
+        return False
+
 def load_transactions_from_file():
     """从 CSV 文件加载个人交易记录"""
     if not os.path.exists(TRANSACTIONS_FILE):
@@ -95,39 +123,74 @@ def save_transactions_to_file(df):
 if 'transactions' not in st.session_state:
     st.session_state.transactions = load_transactions_from_file()
 
-# Strategies are now loaded from GitHub at the start
+# Strategies are loaded based on environment (cloud vs. local)
 if 'strategies' not in st.session_state:
     repo = get_github_repo()
     if repo:
         with st.spinner("正在从 GitHub 同步最新监控策略..."):
             st.session_state.strategies = get_json_from_repo(repo, STRATEGIES_FILE)
     else:
-        st.session_state.strategies = {}
-        st.warning("无法从 GitHub 加载策略，将使用空配置。请检查 Secrets。")
+        st.info("未检测到 GitHub Secrets，将使用本地策略文件 `fund_strategies.json`。")
+        st.session_state.strategies = load_strategies_from_local(STRATEGIES_FILE)
 
 # --- Helper Functions ---
 @st.cache_data
-def get_fund_data(fund_code, start_date, end_date):
-    """获取基金历史净值数据"""
+def get_trade_cal(start_date, end_date):
+    """获取指定范围内的所有A股交易日。"""
     try:
-        fund_data = ak.fund_open_fund_info_em(fund_code, indicator="单位净值走势")
-        if fund_data.empty: return None
-        fund_data['净值日期'] = pd.to_datetime(fund_data['净值日期'])
-        fund_data = fund_data[(fund_data['净值日期'] >= pd.to_datetime(start_date)) & (fund_data['净值日期'] <= pd.to_datetime(end_date))]
-        if fund_data.empty: return None
-        fund_data = fund_data.set_index('净值日期').sort_index()
+        trade_cal_df = ak.tool_trade_date_hist_sina()
+        trade_cal_df['trade_date'] = pd.to_datetime(trade_cal_df['trade_date'])
+        
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        
+        trade_cal = trade_cal_df[
+            (trade_cal_df['trade_date'] >= start_dt) & 
+            (trade_cal_df['trade_date'] <= end_dt)
+        ]['trade_date']
+        
+        return pd.DatetimeIndex(trade_cal)
+    except Exception as e:
+        st.warning(f"获取交易日历失败: {e}. 将回退到使用周一至周五作为交易日。")
+        return pd.bdate_range(start=start_date, end=end_date)
+
+@st.cache_data
+def get_fund_data(fund_code, start_date, end_date):
+    """获取基金历史净值数据, 并严格对齐交易日"""
+    try:
+        # 1. 获取基金原始数据
+        fund_data_raw = ak.fund_open_fund_info_em(fund_code, indicator="单位净值走势")
+        if fund_data_raw.empty: return None
+        
+        fund_data_raw['净值日期'] = pd.to_datetime(fund_data_raw['净值日期'])
+        fund_data = fund_data_raw.set_index('净值日期').sort_index()
         fund_data['单位净值'] = pd.to_numeric(fund_data['单位净值'])
-        fund_data['is_trading_day'] = True
-        full_date_range = pd.date_range(start=fund_data.index.min(), end=fund_data.index.max(), freq='D')
-        fund_data = fund_data.reindex(full_date_range)
+
+        # 2. 获取标准交易日历
+        cal_start = fund_data.index.min() if not fund_data.empty else start_date
+        cal_end = fund_data.index.max() if not fund_data.empty else end_date
+        trade_cal = get_trade_cal(cal_start, cal_end)
+        
+        # 3. 与交易日历进行重采样对齐
+        fund_data = fund_data.reindex(trade_cal)
+        
+        # 4. 填充因基金暂停交易等原因在交易日产生的NaN值
         fund_data['单位净值'] = fund_data['单位净值'].ffill().bfill()
-        fund_data['is_trading_day'] = fund_data['is_trading_day'].notna()
+        
+        # 5. 筛选回用户指定的日期范围
+        fund_data = fund_data[(fund_data.index >= pd.to_datetime(start_date)) & (fund_data.index <= pd.to_datetime(end_date))]
+
+        if fund_data.empty: return None
+
+        # 6. 为了兼容后续代码，添加 is_trading_day 和 last_trading_date
+        fund_data['is_trading_day'] = True
         fund_data['last_trading_date'] = fund_data.index.to_series()
-        fund_data.loc[~fund_data['is_trading_day'], 'last_trading_date'] = pd.NaT
-        fund_data['last_trading_date'] = fund_data['last_trading_date'].ffill()
         fund_data.index.name = '净值日期'
+        
         return fund_data
-    except Exception:
+
+    except Exception as e:
+        st.error(f"获取基金数据时出错: {e}")
         return None
 
 @st.cache_data
@@ -342,6 +405,33 @@ with tab1:
             fig_value.update_layout(title="投资组合价值走势对比", xaxis_title="日期", yaxis_title="价值 (元)", legend=dict(x=0.01, y=0.99))
             st.plotly_chart(fig_value, use_container_width=True)
 
+            with st.expander("💡 指标计算逻辑说明"):
+                st.markdown("#### 核心指标如何计算？")
+                
+                st.markdown("""
+                **1. 最终总价值 (Final Value)**
+                - **定义**: 策略在回测结束日期的总资产价值。
+                - **计算**: `(期末持有份额 × 期末当日净值) + 期末持有现金`
+                - **示例 (阈值策略)**: 最终价值为 **{:.2f}** 元。
+                """.format(thr_results['final_value']))
+
+                st.markdown("""
+                **2. 总投入成本 (Total Invested)**
+                - **定投策略**: 简单地将每次的投资金额累加。
+                  - **计算**: `每次定投金额 × 定投总次数`
+                  - **示例**: `{} 元 × {} 次 = ` **{:.2f}** 元。
+                - **阈值策略**: 只计算策略从"外部"拿钱的总额 (净投入)，卖出盈利后的再投资不计入成本。
+                  - **计算**: 仅在策略持有的现金不足以支付当次买入时，从外部补充的资金才计入总投入。
+                  - **示例**: 本次策略净投入为 **{:.2f}** 元。
+                """.format(dca_amount, len(dca_results['investment_dates']), dca_results['total_invested'], thr_results['total_invested']))
+
+                st.markdown("""
+                **3. 总回报率 (Total Return Rate)**
+                - **定义**: 衡量策略盈利能力的核心指标。
+                - **计算**: `(最终总价值 / 总投入成本 - 1) * 100%`
+                - **示例 (阈值策略)**: `({:.2f} / {:.2f} - 1) * 100% = ` **{:.2f}%**
+                """.format(thr_results['final_value'], thr_results['total_invested'] if thr_results['total_invested'] > 0 else 1, thr_results['return_rate']))
+
             st.subheader("阈值策略详细分析")
             
             fig_trades = make_subplots(specs=[[{"secondary_y": True}]])
@@ -387,7 +477,7 @@ with tab1:
                 if repo:
                     save_json_to_repo(repo, STRATEGIES_FILE, st.session_state.strategies, f"Add/Update strategy for {fund_code}")
                 else:
-                    st.error("无法同步策略，因为未能连接到 GitHub 仓库。")
+                    save_strategies_to_local(STRATEGIES_FILE, st.session_state.strategies)
 
             if thr_transactions:
                 st.write("**交易记录:**")
@@ -413,15 +503,16 @@ with tab1:
             with st.spinner("正在计算操作建议..."):
                 try:
                     today = datetime.now().date()
-                    reference_date_target = today - timedelta(days=lookback_period)
+                    # 获取所有历史数据，并按日期排序
                     hist_data_raw = ak.fund_open_fund_info_em(fund_code, indicator="单位净值走势")
                     hist_data_raw['净值日期'] = pd.to_datetime(hist_data_raw['净值日期']).dt.date
-                    reference_data = hist_data_raw[hist_data_raw['净值日期'] <= reference_date_target].sort_values(by='净值日期', ascending=False)
+                    past_data = hist_data_raw[hist_data_raw['净值日期'] < today].sort_values(by='净值日期', ascending=True)
 
-                    if reference_data.empty:
-                        st.error(f"无法找到 {reference_date_target.strftime('%Y-%m-%d')} 或之前的有效净值数据，无法计算建议。")
+                    if len(past_data) < lookback_period:
+                        st.error(f"历史数据不足 {lookback_period} 个交易日，无法计算建议。")
                     else:
-                        reference_row = reference_data.iloc[0]
+                        # 获取倒数第 N 个交易日的数据作为参考点
+                        reference_row = past_data.iloc[-lookback_period]
                         reference_nav = pd.to_numeric(reference_row['单位净值'])
                         reference_date = reference_row['净值日期']
                         estimated_return = (estimated_nav_input / reference_nav - 1) * 100
@@ -697,5 +788,7 @@ with tab3:
                     repo = get_github_repo()
                     if repo:
                         save_json_to_repo(repo, STRATEGIES_FILE, st.session_state.strategies, f"Remove strategy for {fund_code}")
+                    else:
+                        save_strategies_to_local(STRATEGIES_FILE, st.session_state.strategies)
                     st.rerun()
             st.divider()

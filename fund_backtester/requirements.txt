@@ -1,0 +1,6 @@
+pandas
+akshare
+requests
+streamlit
+plotly
+pandas-ta

@@ -3,16 +3,56 @@ import time
 import sched
 from datetime import datetime, date
 import logging
+import akshare as ak
+import pandas as pd
 
 # --- Configuration ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 g_decision_report_sent_date = date.min # Tracks if the daily decision report has been sent
+g_trade_days_cache = {'date': None, 'days': set()} # Cache for trade days
 
 # --- Core Modules ---
 from fund_monitor.core import get_strategy_advice
 from fund_monitor.notifier import send_email_notification
 
 # --- Helper Functions ---
+def is_today_trade_day():
+    """
+    Checks if today is a trade day using a daily cache to avoid repeated API calls.
+    Falls back to a simple weekday check if the API fails.
+    """
+    global g_trade_days_cache
+    today = date.today()
+    
+    # 1. Check cache first
+    if g_trade_days_cache['date'] == today:
+        # If we have a valid day set, use it. Otherwise, it means we failed before.
+        if g_trade_days_cache['days']:
+             return today in g_trade_days_cache['days']
+        else: # Fallback case for a day we already failed on
+             return today.weekday() < 5
+
+    # 2. If cache is stale, fetch new data
+    logging.info("正在获取最新交易日历...")
+    try:
+        trade_cal_df = ak.tool_trade_date_hist_sina()
+        trade_days = set(pd.to_datetime(trade_cal_df['trade_date']).dt.date)
+        
+        # Update cache
+        g_trade_days_cache['date'] = today
+        g_trade_days_cache['days'] = trade_days
+        
+        is_trade_day = today in trade_days
+        if not is_trade_day:
+            logging.info(f"根据日历, 今天 ({today}) 不是交易日。")
+        return is_trade_day
+    except Exception as e:
+        logging.error(f"获取交易日历失败: {e}. 将回退到周一至周五的简单判断。")
+        # On failure, update cache date to avoid retrying today, but use fallback logic
+        g_trade_days_cache['date'] = today
+        g_trade_days_cache['days'] = set() # Clear days set on failure
+        return today.weekday() < 5
+
 def load_user_config():
     """Loads user configuration from user_config.json."""
     try:
@@ -30,11 +70,15 @@ def load_strategies():
         return {}
 
 def is_time_to_send_report():
-    """Checks if it's time to send the decision report (weekday, after 14:45)."""
+    """Checks if it's time to send the decision report (trade day, after 14:45)."""
     now = datetime.now()
-    is_weekday = now.weekday() < 5
     is_time = now.hour == 14 and now.minute >= 45
-    return is_weekday and is_time
+    
+    # Combine checks: must be the right time on a trade day
+    if not is_time:
+        return False
+    
+    return is_today_trade_day()
 
 def send_decision_report(user_config):
     """
