@@ -3,7 +3,7 @@ name: Run Fund Monitor
 on:
   schedule:
     # Runs at 06:45 UTC (14:45 Beijing Time) every day from Monday to Friday
-    - cron: '32 6 * * 1-5'
+    - cron: '00 6 * * 1-5'
   workflow_dispatch: # Allows manual triggering from the GitHub UI
 
 jobs:
